@@ -4,7 +4,7 @@ from natter_slim import StunClient, KeepAlive
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Tuple, Dict
-from threading import Thread, Event
+from threading import Thread, Event, Lock
 import socket
 import sys
 import http.client
@@ -12,6 +12,7 @@ import re
 import os
 import shutil
 
+global_thread_lock = Lock()
 
 class Logger(object):
     DEBUG = 0
@@ -289,6 +290,7 @@ class MappingSessionPool:
     def __init__(self):
         self.sessions: Dict[Tuple[str, str, int], MappingSession] = {}
         self.lease_fie = "/var/run/natpmp.leases"  # miniupnpd 租约文件，每一行是“<协议>:<外部端口>:<内部地址>:<内部端口>:<过期时间>:<描述>”
+        self.update_lease_file()
 
     def add_session(self, session: MappingSession):
         """添加映射会话"""
@@ -312,6 +314,7 @@ class MappingSessionPool:
     def clear(self):
         """清空映射会话"""
         self.sessions.clear()
+        self.update_lease_file()
 
     def update_lease_file(self):
         """更新租约文件"""
@@ -511,7 +514,12 @@ class NATPMPServer:
     # 先创建一个定期清理过期映射会话的线程
     def clean_sessions(self):
         while self.run_flag.is_set():
+            Logger.debug("开始定期清理过期映射会话，正在获取全局锁")
+            global_thread_lock.acquire()
+            Logger.debug("获取全局锁成功，开始清理过期映射会话")
             self.pool.clean_expired_sessions()
+            global_thread_lock.release()
+            Logger.debug("定期清理过期映射会话完成")
             time.sleep(2)
         Logger.info("定期清理线程已停止")
 
@@ -524,6 +532,7 @@ class NATPMPServer:
         while self.run_flag.is_set():
             # 接收请求
             data, addr = self.sock.recvfrom(1024)
+
             Logger.debug(f"接收到来自 {addr} 的请求")
 
             # 检查ip地址是否为私有地址，公网地址将被忽略
@@ -532,7 +541,12 @@ class NATPMPServer:
                 continue
 
             # 处理请求
+            Logger.debug(f"准备处理来自 {addr} 的请求，正在获取全局锁")
+            global_thread_lock.acquire()
+            Logger.debug(f"获取全局锁成功，开始处理请求")
             response = self.handle_request(data, addr)
+            Logger.debug(f"请求处理完成，释放全局锁")
+            global_thread_lock.release()
 
             # 发送响应
             self.sock.sendto(response.pack(), addr)
