@@ -675,7 +675,18 @@ def run_server():
     httpd.serve_forever()
 
 
+import signal
+import time
+
+def signal_handler(sig, frame):
+    Logger.warning("接收到信号 %s，正在停止服务器..." % sig)
+    # 在这里添加清理代码
+    server.stop()
+
 if __name__ == "__main__":
+    # 捕获 SIGINT 和 SIGTERM 信号
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
     try:
         # Start the NAT-PMP server in a separate thread
         natpmp_thread = Thread(target=server.run)
