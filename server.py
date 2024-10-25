@@ -228,12 +228,15 @@ class MappingSessionPool:
 
     def __init__(self):
         self.sessions: Dict[Tuple[str, str, int], MappingSession] = {}
+        self.lease_fie = "/var/run/miniupnpd.leases"  # miniupnpd 租约文件，每一行是“<协议>:<外部端口>:<内部地址>:<内部端口>:<过期时间>:<描述>”
 
     def add_session(self, session: MappingSession):
         """添加映射会话"""
         self.sessions[
             (session.protocol, session.internal_ip, session.internal_port)
         ] = session
+        # 更新租约文件
+        self.update_lease_file()
 
     def get_session(
         self, protocol: str, internal_ip: str, internal_port: int
@@ -244,23 +247,51 @@ class MappingSessionPool:
     def remove_session(self, protocol: str, internal_ip: str, internal_port: int):
         """删除映射会话"""
         del self.sessions[(protocol, internal_ip, internal_port)]
+        self.update_lease_file()
 
     def clear(self):
         """清空映射会话"""
         self.sessions.clear()
 
+    def update_lease_file(self):
+        """更新租约文件"""
+        with open(self.lease_fie, "w") as f:
+            for key, session in self.sessions.items():
+                f.write(
+                    f"{session.protocol}:{session.remote_port}:{session.internal_ip}:{session.internal_port}:{int(session.expire_time.timestamp())}:STUN中继端口：{session.relay_port}\n"
+                )
+        # 执行/etc/init.d/miniupnpd restart
+        os.system("/etc/init.d/miniupnpd restart")
+
+    def get_keys_from_lease_file(self):
+        """从租约文件中获取键"""
+        keys = []
+        with open(self.lease_fie, "r") as f:
+            for line in f:
+                parts = line.split(":")
+                if len(parts) == 6:
+                    keys.append(
+                        (parts[0], parts[2], int(parts[3]))
+                    )  # (protocol, internal_ip, internal_port)
+        return keys
+
     def clean_expired_sessions(self):
-        """清理过期的映射会话"""
+        """清理过期的映射会话，同时更新租约文件"""
+        # 从租约文件中获取键
+        lease_keys = self.get_keys_from_lease_file()
         now = datetime.now()
         keys_to_delete = [
             key
             for key, session in self.sessions.items()
-            if session.expire_time < now or not session.stun_keepalive.is_alive()
+            if session.expire_time < now or not session.stun_keepalive.is_alive() or key not in lease_keys
         ]
 
         for key in keys_to_delete:
             Logger.warning(f"清理过期的映射会话: {key}")
             del self.sessions[key]
+
+        # 更新租约文件
+        self.update_lease_file()
 
     def __del__(self):
         self.clear()
@@ -678,10 +709,12 @@ def run_server():
 import signal
 import time
 
+
 def signal_handler(sig, frame):
     Logger.warning("接收到信号 %s，正在停止服务器..." % sig)
     # 在这里添加清理代码
     server.stop()
+
 
 if __name__ == "__main__":
     # 捕获 SIGINT 和 SIGTERM 信号
