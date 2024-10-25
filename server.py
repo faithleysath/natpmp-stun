@@ -14,6 +14,7 @@ import shutil
 
 global_thread_lock = Lock()
 
+
 class Logger(object):
     DEBUG = 0
     INFO = 1
@@ -79,7 +80,10 @@ def is_private_ip(ip):
     # 使用 re.match 来判断 ip 是否匹配
     return re.match(private_ip_pattern, ip) is not None
 
-def replace_upnp_lease_file(file_path='/usr/share/rpcd/ucode/luci.upnp', backup_suffix='.bak'):
+
+def replace_upnp_lease_file(
+    file_path="/usr/share/rpcd/ucode/luci.upnp", backup_suffix=".bak"
+):
     # 创建备份文件名
     backup_path = file_path + backup_suffix
 
@@ -93,7 +97,7 @@ def replace_upnp_lease_file(file_path='/usr/share/rpcd/ucode/luci.upnp', backup_
     Logger.debug(f"备份已创建: {backup_path}")
 
     # 读取文件内容
-    with open(file_path, 'r') as file:
+    with open(file_path, "r") as file:
         lines = file.readlines()
 
     # 替换目标字符串
@@ -101,16 +105,20 @@ def replace_upnp_lease_file(file_path='/usr/share/rpcd/ucode/luci.upnp', backup_
     for line in lines:
         # 替换 uci.get 的内容
         if "uci.get('upnpd', 'config', 'upnp_lease_file')" in line:
-            line = line.replace("uci.get('upnpd', 'config', 'upnp_lease_file')", '"/var/run/natpmp.leases"')
+            line = line.replace(
+                "uci.get('upnpd', 'config', 'upnp_lease_file')",
+                '"/var/run/natpmp.leases"',
+            )
         new_lines.append(line)
 
     # 写回修改后的内容
-    with open(file_path, 'w') as file:
+    with open(file_path, "w") as file:
         file.writelines(new_lines)
 
     Logger.debug(f"文件已更新: {file_path}")
 
-def update_upnpd_config(file_path='/etc/config/upnpd', backup_suffix='.bak'):
+
+def update_upnpd_config(file_path="/etc/config/upnpd", backup_suffix=".bak"):
     # 创建备份文件名
     backup_path = file_path + backup_suffix
 
@@ -124,20 +132,63 @@ def update_upnpd_config(file_path='/etc/config/upnpd', backup_suffix='.bak'):
     Logger.debug(f"备份已创建: {backup_path}")
 
     # 读取文件内容
-    with open(file_path, 'r') as file:
+    with open(file_path, "r") as file:
         content = file.read()
 
     # 使用 replace 方法更新选项
     content = content.replace("option enable_upnp '1'", "option enable_upnp '0'")
     content = content.replace("option enable_natpmp '1'", "option enable_natpmp '0'")
     content = content.replace("option use_stun '1'", "option use_stun '0'")
-    content = content.replace("option force_forwarding '1'", "option force_forwarding '0'")
+    content = content.replace(
+        "option force_forwarding '1'", "option force_forwarding '0'"
+    )
 
     # 写回修改后的内容
-    with open(file_path, 'w') as file:
+    with open(file_path, "w") as file:
         file.write(content)
 
     Logger.debug(f"文件已更新: {file_path}")
+
+
+def modify_miniupnpd_script(original_file_path="/etc/init.d/miniupnpd"):
+    # 定义拷贝文件路径
+    modified_file_path = original_file_path + ".modified"
+
+    # 检查是否已经存在修改过的文件
+    if os.path.exists(modified_file_path):
+        Logger.debug(f"修改后的文件已存在: {modified_file_path}，不执行拷贝。")
+        return
+
+    # 拷贝原文件
+    shutil.copy(original_file_path, modified_file_path)
+    Logger.debug(f"已创建文件拷贝: {modified_file_path}")
+
+    # 读取文件内容
+    with open(modified_file_path, "r") as file:
+        content = file.readlines()
+
+    # 修改 stop_service 函数
+    new_content = []
+    inside_stop_service = False
+    for line in content:
+        if line.strip().startswith("stop_service() {"):
+            inside_stop_service = True
+            new_content.append("stop_service() {\n:\n")
+            Logger.debug("已找到 stop_service() 函数，准备将其修改为空函数。")
+            continue
+        elif inside_stop_service and line.strip() == "}":
+            new_content.append("}\n")  # 结束空函数
+            inside_stop_service = False
+            continue
+        if not inside_stop_service:
+            new_content.append(line)
+
+    # 写回修改后的内容
+    with open(modified_file_path, "w") as file:
+        file.writelines(new_content)
+
+    Logger.debug(f"文件已更新: {modified_file_path}")
+
 
 def get_ip(timeout=0.5):
     # 创建 HTTP 连接，设置超时时间
@@ -227,8 +278,9 @@ def keepalive_loop(
             keep_alive.reset()
             need_recheck = True
         sleep_sec = interval - (time.time() - ts)
-        if sleep_sec > 0:
-            time.sleep(sleep_sec)
+        while sleep_sec > 0 and not stopEvent.is_set():
+            time.sleep(0.1)
+            sleep_sec -= 0.1
 
 
 class KeepAliveThread:
@@ -314,17 +366,16 @@ class MappingSessionPool:
     def clear(self):
         """清空映射会话"""
         self.sessions.clear()
-        self.update_lease_file()
 
     def update_lease_file(self):
         """更新租约文件"""
         with open(self.lease_fie, "w") as f:
             for key, session in self.sessions.items():
                 f.write(
-                    f"{session.protocol}:{session.remote_port}:{session.internal_ip}:{session.internal_port}:{int(session.expire_time.timestamp())}:STUN中继端口：{session.relay_port}\n"
+                    f"{session.protocol}:{session.remote_port}:{session.internal_ip}:{session.internal_port}:{int(session.expire_time.timestamp())}:relay port {session.relay_port}\n"
                 )
         # 执行/etc/init.d/miniupnpd restart
-        os.system("/etc/init.d/miniupnpd restart")
+        os.system("/etc/init.d/miniupnpd.modified restart")
 
     def get_keys_from_lease_file(self):
         """从租约文件中获取键"""
@@ -346,7 +397,9 @@ class MappingSessionPool:
         keys_to_delete = [
             key
             for key, session in self.sessions.items()
-            if session.expire_time < now or not session.stun_keepalive.is_alive() or key not in lease_keys
+            if session.expire_time < now
+            or not session.stun_keepalive.is_alive()
+            or key not in lease_keys
         ]
 
         for key in keys_to_delete:
@@ -508,7 +561,10 @@ class NATPMPServer:
                 )
                 self.current_public_ip = new_public_ip
                 Logger.warning(f"广播新的公网IP地址: {new_public_ip}")
-            time.sleep(10)
+            sleep_time = 10
+            while sleep_time > 0 and self.run_flag.is_set():
+                time.sleep(1)
+                sleep_time -= 1
         Logger.info("广播线程已停止")
 
     # 先创建一个定期清理过期映射会话的线程
@@ -774,25 +830,26 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
             self.send_error(400, "Invalid internal port")
 
 
-def run_server():
-    httpd = HTTPServer(("0.0.0.0", 8080), SimpleHTTPRequestHandler)
-    print("Starting web server on http://0.0.0.0:8080")
-    httpd.serve_forever()
-
-
 import signal
-import time
+
+
+def run_server():
+    httpd = HTTPServer(("0.0.0.0", 9699), SimpleHTTPRequestHandler)
+    print("Starting web server on http://0.0.0.0:9699")
+    httpd.serve_forever()
 
 
 def signal_handler(sig, frame):
     Logger.warning("接收到信号 %s，正在停止服务器..." % sig)
     # 在这里添加清理代码
     server.stop()
+    exit(0)
 
 
 if __name__ == "__main__":
     replace_upnp_lease_file()
     update_upnpd_config()
+    modify_miniupnpd_script()
     # 捕获 SIGINT 和 SIGTERM 信号
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
@@ -801,8 +858,12 @@ if __name__ == "__main__":
         natpmp_thread = Thread(target=server.run)
         natpmp_thread.start()
 
-        # Start the web server
-        run_server()
+        # Start the web server in a separate thread
+        web_server_thread = Thread(target=run_server)
+        web_server_thread.start()
+
+        # Wait for both threads to complete
+        web_server_thread.join()
     except KeyboardInterrupt:
         Logger.warning("主程序接收到中断信号，正在退出....")
         pass
