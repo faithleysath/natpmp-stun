@@ -10,6 +10,7 @@ import sys
 import http.client
 import re
 import os
+import shutil
 
 
 class Logger(object):
@@ -77,6 +78,65 @@ def is_private_ip(ip):
     # 使用 re.match 来判断 ip 是否匹配
     return re.match(private_ip_pattern, ip) is not None
 
+def replace_upnp_lease_file(file_path='/usr/share/rpcd/ucode/luci.upnp', backup_suffix='.bak'):
+    # 创建备份文件名
+    backup_path = file_path + backup_suffix
+
+    # 检查备份是否存在
+    if os.path.exists(backup_path):
+        Logger.debug(f"备份文件已存在: {backup_path}，不执行修改。")
+        return
+
+    # 创建备份
+    shutil.copy(file_path, backup_path)
+    Logger.debug(f"备份已创建: {backup_path}")
+
+    # 读取文件内容
+    with open(file_path, 'r') as file:
+        lines = file.readlines()
+
+    # 替换目标字符串
+    new_lines = []
+    for line in lines:
+        # 替换 uci.get 的内容
+        if "uci.get('upnpd', 'config', 'upnp_lease_file')" in line:
+            line = line.replace("uci.get('upnpd', 'config', 'upnp_lease_file')", '"/var/run/natpmp.leases"')
+        new_lines.append(line)
+
+    # 写回修改后的内容
+    with open(file_path, 'w') as file:
+        file.writelines(new_lines)
+
+    Logger.debug(f"文件已更新: {file_path}")
+
+def update_upnpd_config(file_path='/etc/config/upnpd', backup_suffix='.bak'):
+    # 创建备份文件名
+    backup_path = file_path + backup_suffix
+
+    # 检查备份是否存在
+    if os.path.exists(backup_path):
+        Logger.debug(f"备份文件已存在: {backup_path}，不执行修改。")
+        return
+
+    # 创建备份
+    shutil.copy(file_path, backup_path)
+    Logger.debug(f"备份已创建: {backup_path}")
+
+    # 读取文件内容
+    with open(file_path, 'r') as file:
+        content = file.read()
+
+    # 使用 replace 方法更新选项
+    content = content.replace("option enable_upnp '1'", "option enable_upnp '0'")
+    content = content.replace("option enable_natpmp '1'", "option enable_natpmp '0'")
+    content = content.replace("option use_stun '1'", "option use_stun '0'")
+    content = content.replace("option force_forwarding '1'", "option force_forwarding '0'")
+
+    # 写回修改后的内容
+    with open(file_path, 'w') as file:
+        file.write(content)
+
+    Logger.debug(f"文件已更新: {file_path}")
 
 def get_ip(timeout=0.5):
     # 创建 HTTP 连接，设置超时时间
@@ -228,7 +288,7 @@ class MappingSessionPool:
 
     def __init__(self):
         self.sessions: Dict[Tuple[str, str, int], MappingSession] = {}
-        self.lease_fie = "/var/run/miniupnpd.leases"  # miniupnpd 租约文件，每一行是“<协议>:<外部端口>:<内部地址>:<内部端口>:<过期时间>:<描述>”
+        self.lease_fie = "/var/run/natpmp.leases"  # miniupnpd 租约文件，每一行是“<协议>:<外部端口>:<内部地址>:<内部端口>:<过期时间>:<描述>”
 
     def add_session(self, session: MappingSession):
         """添加映射会话"""
@@ -717,6 +777,8 @@ def signal_handler(sig, frame):
 
 
 if __name__ == "__main__":
+    replace_upnp_lease_file()
+    update_upnpd_config()
     # 捕获 SIGINT 和 SIGTERM 信号
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
