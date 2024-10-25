@@ -797,14 +797,23 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
             self.send_error(400, "Missing internal_ip or internal_port")
             return
 
+        protocol = NATPMPClientOpCode.MAP_UDP if protocol == "UDP" else NATPMPClientOpCode.MAP_TCP
+        internal_port = int(internal_port)
+        lifetime = int(lifetime)
         packet = RequestMapPacket(protocol, internal_port, 0, lifetime)
         addr = (internal_ip, 0)  # Mock address since this is manual
-        response_packet = server.handle_map_request(packet, addr)
+        response_packet: ResponseMapPacket = server.handle_map_request(packet, addr)
 
         self.send_response(200)
         self.send_header("Content-type", "application/json")
         self.end_headers()
-        self.wfile.write(json.dumps(response_packet.to_dict()).encode("utf-8"))
+        self.wfile.write(json.dumps({
+            "status": "success",
+            "internal_ip": internal_ip,
+            "internal_port": internal_port,
+            "external_port": response_packet.external_port,
+            "lifetime": lifetime,
+        }).encode("utf-8"))
 
     def handle_delete_mapping(self):
         """Delete a mapping session."""
