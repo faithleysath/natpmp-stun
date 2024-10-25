@@ -18,7 +18,7 @@ class Logger(object):
     WARN = 2
     ERROR = 3
     rep = {DEBUG: "D", INFO: "I", WARN: "W", ERROR: "E"}
-    level = INFO
+    level = DEBUG
     if "256color" in os.environ.get("TERM", ""):
         GREY = "\033[90;20m"
         YELLOW_BOLD = "\033[33;1m"
@@ -259,6 +259,7 @@ class MappingSessionPool:
         ]
 
         for key in keys_to_delete:
+            Logger.warning(f"清理过期的映射会话: {key}")
             del self.sessions[key]
 
     def __del__(self):
@@ -273,7 +274,13 @@ class NATPMPServer:
         self.port = port
         self.pool = MappingSessionPool()
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        # 绑定到指定地址和端口
+        self.sock.bind((self.host, self.port))
         self.run_flag = Event()
+        self.current_public_ip = ""
+        # 子线程
+        self.clean_thread = Thread(target=self.clean_sessions)
+        self.broadcast_thread = Thread(target=self.broadcast)
 
     def handle_request(self, data: bytes, addr: Tuple[str, int]) -> NATPMP_ServerPacket:
         """处理请求，返回响应"""
@@ -352,7 +359,9 @@ class NATPMPServer:
             keepalive_port = 80
         # 开始STUN
         stun = StunClient(bind_ip, bind_port, udp=udp_mode, interface=bind_interface)
+        Logger.info(f"开始STUN: {bind_ip}:{bind_port}")
         natter_addr, outer_addr = stun.get_mapping()
+        Logger.info(f"STUN完成: {natter_addr} -> {outer_addr}")
         bind_ip, bind_port = natter_addr
         keep_alive = KeepAlive(
             keepalive_host,
@@ -362,16 +371,6 @@ class NATPMPServer:
             udp=udp_mode,
             interface=bind_interface,
         )
-        keep_alive.keep_alive()
-        keep_alive.keep_alive()
-        # get the mapped address again after the keep-alive connection is established
-        outer_addr_prev = outer_addr
-        natter_addr, outer_addr = stun.get_mapping()
-        if outer_addr != outer_addr_prev:
-            Logger.warning("网络不稳定，或不是全锥形NAT，无法建立映射")
-            return NATPMP_ServerPacket(
-                response_opcode, NATPMPErrorCode.OUT_OF_RESOURCES
-            )
         # STUN完成，创建STUN保活子线程
         stun_keepalive = KeepAliveThread(stun, keep_alive, udp_mode, outer_addr)
         # 添加映射会话
@@ -401,23 +400,35 @@ class NATPMPServer:
             packet.lifetime,
         )
 
+    def broadcast(self):
+        """定期广播"""
+        while self.run_flag.is_set():
+            status, new_public_ip = get_ip()
+            if status == 200 and new_public_ip != self.current_public_ip:
+                # 向224.0.0.1:5350广播新的公网IP地址
+                self.sock.sendto(
+                    ResponseExternalAddressPacket(
+                        NATPMPErrorCode.SUCCESS, new_public_ip
+                    ).pack(),
+                    ("224.0.0.1", 5350),
+                )
+                self.current_public_ip = new_public_ip
+                Logger.warning(f"广播新的公网IP地址: {new_public_ip}")
+            time.sleep(10)
+        Logger.info("广播线程已停止")
+
+    # 先创建一个定期清理过期映射会话的线程
+    def clean_sessions(self):
+        while self.run_flag.is_set():
+            self.pool.clean_expired_sessions()
+            time.sleep(2)
+        Logger.info("定期清理线程已停止")
+
     def run(self):
-        # 绑定到指定地址和端口
-        self.sock.bind((self.host, self.port))
-        Logger.info(f"NAT-PMP 服务器已启动，监听地址: {self.host}:{self.port}")
-
-        self.clean_event = Event()
-
-        # 先创建一个定期清理过期映射会话的线程
-        def clean_sessions():
-            while not self.clean_event.is_set():
-                self.pool.clean_expired_sessions()
-                time.sleep(2)
-
-        self.clean_thread = Thread(target=clean_sessions)
-        self.clean_thread.start()
-
         self.run_flag.set()
+        self.clean_thread.start()
+        self.broadcast_thread.start()
+        Logger.info(f"NAT-PMP 服务器已启动，监听地址: {self.host}:{self.port}")
 
         while self.run_flag.is_set():
             # 接收请求
@@ -434,21 +445,24 @@ class NATPMPServer:
 
             # 发送响应
             self.sock.sendto(response.pack(), addr)
+        Logger.info("NAT-PMP 服务器已停止")
 
     def stop(self):
-        self.run_flag.clear()
-        # 给本机发送一个请求外部ip的请求，以便唤醒阻塞在recvfrom的线程
-        soc = new_socket_reuse(socket.AF_INET, socket.SOCK_DGRAM)
-        soc.sendto(RequestExternalAddressPacket().pack(), ("127.0.0.1", self.port))
-        soc.close()
-        Logger.warning("正在停止 NAT-PMP 服务器...")
-        self.clean_event.set()
-        Logger.warning("等待定期清理线程结束...")
-        self.clean_thread.join()
-        self.sock.close()
-        Logger.warning("清理线程已结束")
-        self.pool.clear()
-        Logger.warning("会话池已清空，接下来进入会话的析构函数，将析构stun保活线程并删除规则")
+        if self.run_flag.is_set():
+            self.run_flag.clear()
+            # 给本机发送一个请求外部ip的请求，以便唤醒阻塞在recvfrom的线程
+            soc = new_socket_reuse(socket.AF_INET, socket.SOCK_DGRAM)
+            soc.sendto(RequestExternalAddressPacket().pack(), ("127.0.0.1", self.port))
+            soc.close()
+            Logger.warning("正在停止 NAT-PMP 服务器...")
+            self.clean_thread.join()
+            self.broadcast_thread.join()
+            self.sock.close()
+            Logger.warning("清理与广播线程已结束")
+            self.pool.clear()
+            Logger.warning(
+                "会话池已清空，接下来进入会话的析构函数，将析构stun保活线程并删除规则"
+            )
 
     def __del__(self):
         self.stop()
@@ -465,21 +479,21 @@ server = NATPMPServer()
 
 class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path == '/':
+        if self.path == "/":
             self.handle_index()
-        elif self.path == '/mappings':
+        elif self.path == "/mappings":
             self.handle_list_mappings()
         else:
             self.send_error(404, "File Not Found")
 
     def do_POST(self):
-        if self.path == '/mappings':
+        if self.path == "/mappings":
             self.handle_add_mapping()
         else:
             self.send_error(404, "File Not Found")
 
     def do_DELETE(self):
-        if '/mappings/' in self.path:
+        if "/mappings/" in self.path:
             self.handle_delete_mapping()
         else:
             self.send_error(404, "File Not Found")
@@ -487,7 +501,7 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
     def handle_index(self):
         """Handle the root path to provide API overview, current mappings, and forms for add/delete."""
         self.send_response(200)
-        self.send_header('Content-type', 'text/html')
+        self.send_header("Content-type", "text/html")
         self.end_headers()
 
         # Overview and mapping table
@@ -577,41 +591,44 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
                 f"Expire_at: {session.expire_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
             )
 
-        self.wfile.write(api_overview.format(mapping_table=mapping_table).encode('utf-8'))
-
+        self.wfile.write(
+            api_overview.format(mapping_table=mapping_table).encode("utf-8")
+        )
 
     def handle_list_mappings(self):
         """List all mapping sessions."""
         self.send_response(200)
-        self.send_header('Content-type', 'application/json')
+        self.send_header("Content-type", "application/json")
         self.end_headers()
 
         public_ip = get_ip()[1]
         sessions = []
         for key, session in server.pool.sessions.items():
-            sessions.append({
-                'protocol': session.protocol,
-                'internal_ip': session.internal_ip,
-                'internal_port': session.internal_port,
-                'relay_port': session.relay_port,
-                'public_ip': public_ip,
-                'remote_port': session.remote_port,
-                'expire_time': session.expire_time.isoformat()
-            })
-        self.wfile.write(json.dumps(sessions).encode('utf-8'))
+            sessions.append(
+                {
+                    "protocol": session.protocol,
+                    "internal_ip": session.internal_ip,
+                    "internal_port": session.internal_port,
+                    "relay_port": session.relay_port,
+                    "public_ip": public_ip,
+                    "remote_port": session.remote_port,
+                    "expire_time": session.expire_time.isoformat(),
+                }
+            )
+        self.wfile.write(json.dumps(sessions).encode("utf-8"))
 
     def handle_add_mapping(self):
         """Add a new mapping session."""
-        content_length = int(self.headers['Content-Length'])
+        content_length = int(self.headers["Content-Length"])
         post_data = self.rfile.read(content_length)
-        data = json.loads(post_data.decode('utf-8'))
+        data = json.loads(post_data.decode("utf-8"))
 
-        protocol = data.get('protocol')
-        internal_ip = data.get('internal_ip')
-        internal_port = data.get('internal_port')
-        lifetime = data.get('lifetime', 3600)  # Default to 1 hour if not provided
+        protocol = data.get("protocol")
+        internal_ip = data.get("internal_ip")
+        internal_port = data.get("internal_port")
+        lifetime = data.get("lifetime", 3600)  # Default to 1 hour if not provided
 
-        if protocol not in ['TCP', 'UDP']:
+        if protocol not in ["TCP", "UDP"]:
             self.send_error(400, "Unsupported protocol")
             return
 
@@ -624,15 +641,15 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
         response_packet = server.handle_map_request(packet, addr)
 
         self.send_response(200)
-        self.send_header('Content-type', 'application/json')
+        self.send_header("Content-type", "application/json")
         self.end_headers()
-        self.wfile.write(json.dumps(response_packet.to_dict()).encode('utf-8'))
+        self.wfile.write(json.dumps(response_packet.to_dict()).encode("utf-8"))
 
     def handle_delete_mapping(self):
         """Delete a mapping session."""
         parsed_path = urllib.parse.urlparse(self.path)
-        path_parts = parsed_path.path.split('/')
-        
+        path_parts = parsed_path.path.split("/")
+
         if len(path_parts) != 5:
             self.send_error(400, "Invalid path format")
             return
@@ -643,9 +660,9 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
             internal_port = int(internal_port)
             server.pool.remove_session(protocol, internal_ip, internal_port)
             self.send_response(200)
-            self.send_header('Content-type', 'application/json')
+            self.send_header("Content-type", "application/json")
             self.end_headers()
-            self.wfile.write(json.dumps({'status': 'success'}).encode('utf-8'))
+            self.wfile.write(json.dumps({"status": "success"}).encode("utf-8"))
         except KeyError:
             self.send_error(404, "Mapping not found")
         except ValueError:
@@ -653,7 +670,7 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
 
 
 def run_server():
-    httpd = HTTPServer(('0.0.0.0', 8080), SimpleHTTPRequestHandler)
+    httpd = HTTPServer(("0.0.0.0", 8080), SimpleHTTPRequestHandler)
     print("Starting web server on http://0.0.0.0:8080")
     httpd.serve_forever()
 
