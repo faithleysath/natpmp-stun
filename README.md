@@ -1,7 +1,5 @@
 # natpmp-stun 项目
 
-![使用截图](/doc/img/web-interface.png)
-
 ## 简介
 
 `natpmp-stun` 是一个基于 NAT-PMP 协议的端口映射和 STUN (Session Traversal Utilities for NAT) 功能的实现项目。它提供了一种在 NAT 网络中自动配置端口转发的方式，并且支持通过 STUN 协议检测和公布外部 IP 地址。
@@ -121,3 +119,8 @@ eth0为wan口，eth1为br-lan
 ## 许可证
 
 该项目基于 GPLv3 许可证发布，详细信息请参考项目中的 LICENSE 文件。
+
+## 使用截图
+
+![运行日志](/doc/img/log.png)
+![web界面](/doc/img/web-interface.png)
