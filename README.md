@@ -1,6 +1,6 @@
 # natpmp-stun 项目
 
-![使用截图](https://cdn.img2ipfs.com/ipfs/QmYo1U6ggyzh4BKCQAXYd21VrwNgwtje4yyX7xXuaHCwRB?filename=web-interface.png)
+![使用截图](/doc/img/web-interface.png)
 
 ## 简介
 
