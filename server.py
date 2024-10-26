@@ -81,44 +81,10 @@ def is_private_ip(ip):
     return re.match(private_ip_pattern, ip) is not None
 
 
-def replace_upnp_lease_file(
-    file_path="/usr/share/rpcd/ucode/luci.upnp", backup_suffix=".bak"
-):
-    # 创建备份文件名
-    backup_path = file_path + backup_suffix
-
-    # 检查备份是否存在
-    if os.path.exists(backup_path):
-        Logger.debug(f"备份文件已存在: {backup_path}，不执行修改。")
-        return
-
-    # 创建备份
-    shutil.copy(file_path, backup_path)
-    Logger.debug(f"备份已创建: {backup_path}")
-
-    # 读取文件内容
-    with open(file_path, "r") as file:
-        lines = file.readlines()
-
-    # 替换目标字符串
-    new_lines = []
-    for line in lines:
-        # 替换 uci.get 的内容
-        if "uci.get('upnpd', 'config', 'upnp_lease_file')" in line:
-            line = line.replace(
-                "uci.get('upnpd', 'config', 'upnp_lease_file')",
-                '"/var/run/natpmp.leases"',
-            )
-        new_lines.append(line)
-
-    # 写回修改后的内容
-    with open(file_path, "w") as file:
-        file.writelines(new_lines)
-
-    Logger.debug(f"文件已更新: {file_path}")
-
-
 def update_upnpd_config(file_path="/etc/config/upnpd", backup_suffix=".bak"):
+    # 检查文件是否存在
+    if not os.path.exists(file_path):
+        return
     # 创建备份文件名
     backup_path = file_path + backup_suffix
 
@@ -136,6 +102,7 @@ def update_upnpd_config(file_path="/etc/config/upnpd", backup_suffix=".bak"):
         content = file.read()
 
     # 使用 replace 方法更新选项
+    content = content.replace("option enabled '1'", "option enabled '0'")
     content = content.replace("option enable_upnp '1'", "option enable_upnp '0'")
     content = content.replace("option enable_natpmp '1'", "option enable_natpmp '0'")
     content = content.replace("option use_stun '1'", "option use_stun '0'")
@@ -148,46 +115,6 @@ def update_upnpd_config(file_path="/etc/config/upnpd", backup_suffix=".bak"):
         file.write(content)
 
     Logger.debug(f"文件已更新: {file_path}")
-
-
-def modify_miniupnpd_script(original_file_path="/etc/init.d/miniupnpd"):
-    # 定义拷贝文件路径
-    modified_file_path = original_file_path + ".modified"
-
-    # 检查是否已经存在修改过的文件
-    if os.path.exists(modified_file_path):
-        Logger.debug(f"修改后的文件已存在: {modified_file_path}，不执行拷贝。")
-        return
-
-    # 拷贝原文件
-    shutil.copy(original_file_path, modified_file_path)
-    Logger.debug(f"已创建文件拷贝: {modified_file_path}")
-
-    # 读取文件内容
-    with open(modified_file_path, "r") as file:
-        content = file.readlines()
-
-    # 修改 stop_service 函数
-    new_content = []
-    inside_stop_service = False
-    for line in content:
-        if line.strip().startswith("stop_service() {"):
-            inside_stop_service = True
-            new_content.append("stop_service() {\n:\n")
-            Logger.debug("已找到 stop_service() 函数，准备将其修改为空函数。")
-            continue
-        elif inside_stop_service and line.strip() == "}":
-            new_content.append("}\n")  # 结束空函数
-            inside_stop_service = False
-            continue
-        if not inside_stop_service:
-            new_content.append(line)
-
-    # 写回修改后的内容
-    with open(modified_file_path, "w") as file:
-        file.writelines(new_content)
-
-    Logger.debug(f"文件已更新: {modified_file_path}")
 
 
 def get_ip(timeout=0.5):
@@ -341,8 +268,6 @@ class MappingSessionPool:
 
     def __init__(self):
         self.sessions: Dict[Tuple[str, str, int], MappingSession] = {}
-        self.lease_fie = "/var/run/natpmp.leases"  # miniupnpd 租约文件，每一行是“<协议>:<外部端口>:<内部地址>:<内部端口>:<过期时间>:<描述>”
-        self.update_lease_file()
 
     def add_session(self, session: MappingSession):
         """添加映射会话"""
@@ -350,7 +275,6 @@ class MappingSessionPool:
             (session.protocol, session.internal_ip, session.internal_port)
         ] = session
         # 更新租约文件
-        self.update_lease_file()
 
     def get_session(
         self, protocol: str, internal_ip: str, internal_port: int
@@ -361,53 +285,24 @@ class MappingSessionPool:
     def remove_session(self, protocol: str, internal_ip: str, internal_port: int):
         """删除映射会话"""
         del self.sessions[(protocol, internal_ip, internal_port)]
-        self.update_lease_file()
 
     def clear(self):
         """清空映射会话"""
         self.sessions.clear()
 
-    def update_lease_file(self):
-        """更新租约文件"""
-        with open(self.lease_fie, "w") as f:
-            for key, session in self.sessions.items():
-                f.write(
-                    f"{session.protocol}:{session.remote_port}:{session.internal_ip}:{session.internal_port}:{int(session.expire_time.timestamp())}:relay port {session.relay_port}\n"
-                )
-        # 执行/etc/init.d/miniupnpd restart
-        os.system("/etc/init.d/miniupnpd.modified restart")
-
-    def get_keys_from_lease_file(self):
-        """从租约文件中获取键"""
-        keys = []
-        with open(self.lease_fie, "r") as f:
-            for line in f:
-                parts = line.split(":")
-                if len(parts) == 6:
-                    keys.append(
-                        (parts[0], parts[2], int(parts[3]))
-                    )  # (protocol, internal_ip, internal_port)
-        return keys
-
     def clean_expired_sessions(self):
-        """清理过期的映射会话，同时更新租约文件"""
-        # 从租约文件中获取键
-        lease_keys = self.get_keys_from_lease_file()
+        """清理过期的映射会话"""
         now = datetime.now()
         keys_to_delete = [
             key
             for key, session in self.sessions.items()
             if session.expire_time < now
             or not session.stun_keepalive.is_alive()
-            or key not in lease_keys
         ]
 
         for key in keys_to_delete:
             Logger.warning(f"清理过期的映射会话: {key}")
             del self.sessions[key]
-
-        # 更新租约文件
-        self.update_lease_file()
 
     def __del__(self):
         self.clear()
@@ -798,6 +693,7 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
             return
 
         protocol = NATPMPClientOpCode.MAP_UDP if protocol == "UDP" else NATPMPClientOpCode.MAP_TCP
+        public_ip = get_ip()[1]
         internal_port = int(internal_port)
         lifetime = int(lifetime)
         packet = RequestMapPacket(protocol, internal_port, 0, lifetime)
@@ -811,6 +707,7 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
             "status": "success",
             "internal_ip": internal_ip,
             "internal_port": internal_port,
+            "public_ip": public_ip,
             "external_port": response_packet.external_port,
             "lifetime": lifetime,
         }).encode("utf-8"))
@@ -856,9 +753,7 @@ def signal_handler(sig, frame):
 
 
 if __name__ == "__main__":
-    replace_upnp_lease_file()
     update_upnpd_config()
-    modify_miniupnpd_script()
     # 捕获 SIGINT 和 SIGTERM 信号
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
