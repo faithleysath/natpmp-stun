@@ -69,6 +69,8 @@ class Logger(object):
 
 def is_valid_ip(ip):
     # 使用提供的正则表达式检查IP地址的有效性
+    if not isinstance(ip, str):
+        return False
     pattern = r"(?:(?:1[0-9][0-9]\.)|(?:2[0-4][0-9]\.)|(?:25[0-5]\.)|(?:[1-9][0-9]\.)|(?:[0-9]\.)){3}(?:(?:1[0-9][0-9])|(?:2[0-4][0-9])|(?:25[0-5])|(?:[1-9][0-9])|(?:[0-9]))"
     return re.match(pattern, ip) is not None
 
@@ -81,21 +83,10 @@ def is_private_ip(ip):
     return re.match(private_ip_pattern, ip) is not None
 
 
-def update_upnpd_config(file_path="/etc/config/upnpd", backup_suffix=".bak"):
+def update_upnpd_config(file_path="/etc/config/upnpd"):
     # 检查文件是否存在
     if not os.path.exists(file_path):
         return
-    # 创建备份文件名
-    backup_path = file_path + backup_suffix
-
-    # 检查备份是否存在
-    if os.path.exists(backup_path):
-        Logger.debug(f"备份文件已存在: {backup_path}，不执行修改。")
-        return
-
-    # 创建备份
-    shutil.copy(file_path, backup_path)
-    Logger.debug(f"备份已创建: {backup_path}")
 
     # 读取文件内容
     with open(file_path, "r") as file:
@@ -117,7 +108,19 @@ def update_upnpd_config(file_path="/etc/config/upnpd", backup_suffix=".bak"):
     Logger.debug(f"文件已更新: {file_path}")
 
 
-def get_ip(timeout=0.5):
+# 定义缓存变量
+cache = {"ip": None, "timestamp": 0}
+
+
+def get_ip():
+    timeout = 0.5
+    cache_duration = 600  # 缓存有效期为 x 秒
+
+    # 检查缓存是否有效
+    current_time = time.time()
+    if is_valid_ip(cache["ip"]) and current_time - cache["timestamp"] < cache_duration:
+        return (200, cache["ip"])
+
     # 创建 HTTP 连接，设置超时时间
     conn = http.client.HTTPConnection("api.ipify.cn", timeout=timeout)
 
@@ -134,6 +137,9 @@ def get_ip(timeout=0.5):
         # 检查响应状态码
         if response.status == 200:
             if is_valid_ip(data):
+                # 更新缓存
+                cache["ip"] = data
+                cache["timestamp"] = current_time
                 return (response.status, data)  # 返回状态码和有效的 IP 地址
             else:
                 return (400, "返回的内容不是有效的 IP 地址")  # 状态码设置为 400
@@ -206,8 +212,8 @@ def keepalive_loop(
             need_recheck = True
         sleep_sec = interval - (time.time() - ts)
         while sleep_sec > 0 and not stopEvent.is_set():
-            time.sleep(0.1)
-            sleep_sec -= 0.1
+            time.sleep(1)
+            sleep_sec -= 1
 
 
 class KeepAliveThread:
@@ -274,7 +280,6 @@ class MappingSessionPool:
         self.sessions[
             (session.protocol, session.internal_ip, session.internal_port)
         ] = session
-        # 更新租约文件
 
     def get_session(
         self, protocol: str, internal_ip: str, internal_port: int
@@ -296,8 +301,7 @@ class MappingSessionPool:
         keys_to_delete = [
             key
             for key, session in self.sessions.items()
-            if session.expire_time < now
-            or not session.stun_keepalive.is_alive()
+            if session.expire_time < now or not session.stun_keepalive.is_alive()
         ]
 
         for key in keys_to_delete:
@@ -347,10 +351,10 @@ class NATPMPServer:
             else:
                 raise UnsupportedOpcodeError()
         except UnsupportedVersionError:
-            Logger.warning(f"接收到来自 {addr} 的不支持的 NAT-PMP 版本请求")
+            Logger.warning(f"接收到来自 {addr} 的请求：不支持的 NAT-PMP 版本")
             return NATPMP_ServerPacket(0, NATPMPErrorCode.UNSUPPORTED_VERSION)
         except UnsupportedOpcodeError:
-            Logger.warning(f"接收到来自 {addr} 的不支持的 NAT-PMP 操作请求")
+            Logger.warning(f"接收到来自 {addr} 的请求：不支持的操作码")
             return NATPMP_ServerPacket(0, NATPMPErrorCode.UNSUPPORTED_OPCODE)
 
     def handle_map_request(
@@ -456,10 +460,10 @@ class NATPMPServer:
                 )
                 self.current_public_ip = new_public_ip
                 Logger.warning(f"广播新的公网IP地址: {new_public_ip}")
-            sleep_time = 10
+            sleep_time = 100
             while sleep_time > 0 and self.run_flag.is_set():
-                time.sleep(1)
-                sleep_time -= 1
+                time.sleep(2)
+                sleep_time -= 2
         Logger.info("广播线程已停止")
 
     # 先创建一个定期清理过期映射会话的线程
@@ -692,7 +696,11 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
             self.send_error(400, "Missing internal_ip or internal_port")
             return
 
-        protocol = NATPMPClientOpCode.MAP_UDP if protocol == "UDP" else NATPMPClientOpCode.MAP_TCP
+        protocol = (
+            NATPMPClientOpCode.MAP_UDP
+            if protocol == "UDP"
+            else NATPMPClientOpCode.MAP_TCP
+        )
         public_ip = get_ip()[1]
         internal_port = int(internal_port)
         lifetime = int(lifetime)
@@ -703,14 +711,18 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "application/json")
         self.end_headers()
-        self.wfile.write(json.dumps({
-            "status": "success",
-            "internal_ip": internal_ip,
-            "internal_port": internal_port,
-            "public_ip": public_ip,
-            "external_port": response_packet.external_port,
-            "lifetime": lifetime,
-        }).encode("utf-8"))
+        self.wfile.write(
+            json.dumps(
+                {
+                    "status": "success",
+                    "internal_ip": internal_ip,
+                    "internal_port": internal_port,
+                    "public_ip": public_ip,
+                    "external_port": response_packet.external_port,
+                    "lifetime": lifetime,
+                }
+            ).encode("utf-8")
+        )
 
     def handle_delete_mapping(self):
         """Delete a mapping session."""
