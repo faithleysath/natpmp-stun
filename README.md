@@ -1,5 +1,7 @@
 # natpmp-stun 项目
 
+![使用截图](https://cdn.img2ipfs.com/ipfs/QmYo1U6ggyzh4BKCQAXYd21VrwNgwtje4yyX7xXuaHCwRB?filename=web-interface.png)
+
 ## 简介
 
 `natpmp-stun` 是一个基于 NAT-PMP 协议的端口映射和 STUN (Session Traversal Utilities for NAT) 功能的实现项目。它提供了一种在 NAT 网络中自动配置端口转发的方式，并且支持通过 STUN 协议检测和公布外部 IP 地址。
@@ -9,7 +11,7 @@
 ## 主要功能
 
 1. **NAT-PMP 服务器实现**：
-   - 处理 NAT-PMP 客户端请求。
+   - 处理 NAT-PMP 客户端（如qbbittorrent、transmission）的请求。
    - 支持获取外部 IP 地址和端口映射功能。
    - 自动处理请求中的不支持版本和操作码。
 
